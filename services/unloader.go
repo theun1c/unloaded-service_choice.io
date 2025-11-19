@@ -113,6 +113,8 @@ func (u *Unloader) Start() {
 		pp.Println(uniqueGenres[i])
 		count1++
 	}
+
+	
 }
 
 // для удаления повторяющихся жанров
