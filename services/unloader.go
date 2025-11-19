@@ -2,77 +2,71 @@ package services
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/darenliang/jikan-go"
 	"github.com/k0kubun/pp"
 )
 
+// структура лоадера 
 type Unloader struct {
 }
 
+// конструктор лоадера
 func NewUnloader() *Unloader {
 	return &Unloader{}
 }
 
-type DateRange struct {
-	From time.Time `json:"from"`
-	To   time.Time `json:"to"`
-	Prop struct {
-		From struct {
-			Day   int `json:"day"`
-			Month int `json:"month"`
-			Year  int `json:"year"`
-		} `json:"from"`
-		To struct {
-			Day   int `json:"day"`
-			Month int `json:"month"`
-			Year  int `json:"year"`
-		} `json:"to"`
-		String string `json:"string"`
-	} `json:"prop"`
-}
-
-type Images3 struct {
-	Jpg struct {
-		ImageUrl      string `json:"image_url"`
-		SmallImageUrl string `json:"small_image_url"`
-		LargeImageUrl string `json:"large_image_url"`
-	} `json:"jpg"`
-	Webp struct {
-		ImageUrl      string `json:"image_url"`
-		SmallImageUrl string `json:"small_image_url"`
-		LargeImageUrl string `json:"large_image_url"`
-	} `json:"webp"`
-}
-
+// Структура для необходимых данных
 type Anime struct {
-	MalId          int             `json:"mal_id"`
-	Url            string          `json:"url"`
-	Images         Images3         `json:"images"`
-	Title          string          `json:"title"`
-	TitleEnglish   string          `json:"title_english"`
-	Genres         []jikan.MalItem `json:"genres"`
-	ExplicitGenres []jikan.MalItem `json:"explicit_genres"`
+	MalId        int             `json:"mal_id"`
+	Url          string          `json:"url"`
+	Images       jikan.Images3   `json:"images"`
+	Title        string          `json:"title"`
+	TitleEnglish string          `json:"title_english"`
+	Type         string          `json:"type"`
+	Episodes     int             `json:"episodes"`
+	Status       string          `json:"status"`
+	Rating       string          `json:"rating"`
+	Score        float64         `json:"score"`
+	Synopsis     string          `json:"synopsis"`
+	Year         int             `json:"year"`
+	Genres       []jikan.MalItem `json:"genres"`
 }
 
+//TODO: разбить объект Anime на несколько подъобъектов для удобной записи в супабейз
 func (u *Unloader) Start() {
-
-	anime, err := jikan.GetAnimeById(1)
+	// в этом месте получаем только 25 записей за 1 запрос.
+	// нужно будет увеличить таймаут и итерировать страницы
+	anime, err := jikan.GetTopAnime("tv", "bypopularity", 2)
 	if err != nil {
 		fmt.Println("error: ", err)
 		return
 	}
-
-	an := Anime{
-		MalId:          anime.Data.MalId,
-		Url:            anime.Data.Url,
-		Images:         Images3(anime.Data.Images),
-		Title:          anime.Data.Title,
-		TitleEnglish:   anime.Data.TitleEnglish,
-		Genres:         anime.Data.Genres,
-		ExplicitGenres: anime.Data.ExplicitGenres,
+	
+	// объявляем слайс, в котором будут лежать объекты аниме с нуными полями
+	var animeList []Anime
+	// запускаем все в цикле 
+	for i := 0; i < len(anime.Data); i++ {
+		anm := Anime{
+			MalId:        anime.Data[i].MalId,
+			Url:          anime.Data[i].Url,
+			Images:       anime.Data[i].Images,
+			Title:        anime.Data[i].Title,
+			TitleEnglish: anime.Data[i].TitleEnglish,
+			Type:         anime.Data[i].Type,
+			Episodes:     anime.Data[i].Episodes,
+			Status:       anime.Data[i].Status,
+			Rating:       anime.Data[i].Rating,
+			Score:        anime.Data[i].Score,
+			Synopsis:     anime.Data[i].Synopsis,
+			Year:         anime.Data[i].Year,
+			Genres:       anime.Data[i].Genres,
+		}
+		animeList = append(animeList, anm)
 	}
 
-	pp.Println(an)
+	// выводим полученные объекты 
+	for i := 0; i < len(animeList) ; i++ {
+		pp.Println(animeList[i])
+	}
 }
