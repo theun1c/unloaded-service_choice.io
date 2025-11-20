@@ -13,16 +13,13 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// структура лоадера
 type Unloader struct {
 }
 
-// конструктор лоадера
 func NewUnloader() *Unloader {
 	return &Unloader{}
 }
 
-// Жанры без аниме
 type Genre struct {
 	ID    int64  `json:"id,omitempty"`
 	MalId int    `json:"mal_id"`
@@ -31,7 +28,6 @@ type Genre struct {
 	Url   string `json:"url"`
 }
 
-// Структура для необходимых данных
 type Anime struct {
 	ID           int64         `json:"id,omitempty"`
 	MalId        int           `json:"mal_id"`
@@ -48,35 +44,42 @@ type Anime struct {
 	Year         int           `json:"year"`
 }
 
-// Таблица связи многие-ко-многим
 type AnimeGenre struct {
 	AnimeID int64 `json:"anime_id"`
 	GenreID int64 `json:"genre_id"`
 }
 
-// TODO: разбить объект Anime на несколько подъобъектов для удобной записи в супабейз
-
-// получили поля Аниме. Получили поля жанров.
-// жанры будут записываться в БД и проверяться на новые поля.
-// аниме сущность будет хранить массив айдишников на жанры, что создает связь 1 ко мн
+// Start - выгрузка аниме по страницам
 func (u *Unloader) Start() {
-	// в этом месте получаем только 25 записей за 1 запрос.
-	// нужно будет увеличить таймаут и итерировать страницы
-	anime, err := jikan.GetTopAnime("tv", "bypopularity", 2)
+	err := godotenv.Load()
 	if err != nil {
-		fmt.Println("error: ", err)
+		fmt.Println("Warning: Could not load .env file")
+	}
+
+	var page int
+	fmt.Print("Введите номер страницы для выгрузки: ")
+	fmt.Scan(&page)
+
+	fmt.Printf("Загружаем страницу %d...\n", page)
+
+	anime, err := jikan.GetTopAnime("tv", "airing", page)
+	if err != nil {
+		fmt.Printf("Ошибка загрузки страницы %d: %v\n", page, err)
 		return
 	}
 
-	// запускаем все в цикле
-	for i := 0; i < len(anime.Data); i++ {
-		// TODO: так может не делать общую структуру а разбить по мелким объектам сразу ?
-		// А нужно ли вообще разбивать все на разные таблицы ?
+	if len(anime.Data) == 0 {
+		fmt.Println("Страница пустая")
+		return
+	}
 
-		// пришел к выводу о том, что ТИПЫ аниме выделять в отдельную таблицу не стоит
-		// поскольку типы не нужны в аналитике и в данном проекте. они являются просто текстовым полем - не более
-		// и влияют только на описание, в то время как ЖАНРЫ, которые следует выделить в отдельную таблицу,
-		// помогут в реализации основной задумки проекта
+	fmt.Printf("Получено %d аниме для обработки\n", len(anime.Data))
+
+	totalAnime := 0
+	totalGenres := 0
+	totalRelations := 0
+
+	for i := 0; i < len(anime.Data); i++ {
 		animeItem := Anime{
 			MalId:        anime.Data[i].MalId,
 			Url:          anime.Data[i].Url,
@@ -92,11 +95,23 @@ func (u *Unloader) Start() {
 			Year:         anime.Data[i].Year,
 		}
 
+		fmt.Printf("[%d] %s\n", i+1, animeItem.Title)
+
 		insertedAnime, err := insertAnime(animeItem)
 		if err != nil {
-			fmt.Println("Failed to insert anime row")
-			return
+			fmt.Printf("Ошибка аниме: %v\n", err)
+			continue
 		}
+
+		if insertedAnime.ID == 0 {
+			fmt.Printf("Аниме уже существует\n")
+		} else {
+			totalAnime++
+			fmt.Printf("Аниме добавлено (ID: %d)\n", insertedAnime.ID)
+		}
+
+		fmt.Printf("Жанров: %d\n", len(anime.Data[i].Genres))
+		genreCount := 0
 
 		for j := 0; j < len(anime.Data[i].Genres); j++ {
 			genreItem := Genre{
@@ -108,47 +123,72 @@ func (u *Unloader) Start() {
 
 			insertedGenre, err := insertGenre(genreItem)
 			if err != nil {
-				fmt.Println("Failed to insert genre")
-				return
+				fmt.Printf("Ошибка жанра %s: %v\n", genreItem.Name, err)
+				continue
+			}
+
+			if insertedGenre.ID == 0 {
+				fmt.Printf("Жанр уже существует: %s\n", insertedGenre.Name)
+			} else {
+				totalGenres++
+				fmt.Printf("Жанр добавлен: %s (ID: %d)\n", insertedGenre.Name, insertedGenre.ID)
 			}
 
 			err = insertAnimeGenre(insertedAnime.ID, insertedGenre.ID)
 			if err != nil {
-				fmt.Printf("Failed to create relation %v", err)
+				fmt.Printf("Ошибка связи: %v\n", err)
+				continue
 			}
+
+			totalRelations++
+			genreCount++
+			fmt.Printf("Связь создана\n")
 		}
 
+		fmt.Printf("Создано связей: %d/%d\n", genreCount, len(anime.Data[i].Genres))
+		time.Sleep(100 * time.Millisecond)
 	}
+
+	fmt.Printf("Страница %d завершена\n", page)
+	fmt.Printf("Итого за страницу:\n")
+	fmt.Printf("Новых аниме: %d\n", totalAnime)
+	fmt.Printf("Новых жанров: %d\n", totalGenres)
+	fmt.Printf("Создано связей: %d\n", totalRelations)
 }
 
-// // для удаления повторяющихся жанров
-// func removeDup(inputSlice []Genre) []Genre {
-// 	isUnique := map[Genre]bool{}
-
-// 	resultSlice := []Genre{}
-
-// 	for _, item := range inputSlice {
-// 		if !isUnique[item] {
-// 			isUnique[item] = true
-// 			resultSlice = append(resultSlice, item)
-// 		}
-// 	}
-
-// 	return resultSlice
-// }
-
+// insertAnime - вставка аниме с проверкой существования
 func insertAnime(animeItem Anime) (*Anime, error) {
+	exists, animeID, err := animeExists(animeItem.MalId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check anime existence: %w", err)
+	}
 
-	err := godotenv.Load()
+	if exists {
+		fmt.Printf("Аниме уже существует: %s (ID: %d)\n", animeItem.Title, animeID)
+		return &Anime{
+			ID:           animeID,
+			MalId:        animeItem.MalId,
+			Url:          animeItem.Url,
+			Images:       animeItem.Images,
+			Title:        animeItem.Title,
+			TitleEnglish: animeItem.TitleEnglish,
+			Type:         animeItem.Type,
+			Episodes:     animeItem.Episodes,
+			Status:       animeItem.Status,
+			Rating:       animeItem.Rating,
+			Score:        animeItem.Score,
+			Synopsis:     animeItem.Synopsis,
+			Year:         animeItem.Year,
+		}, nil
+	}
+
+	err = godotenv.Load()
 	if err != nil {
 		fmt.Println("Warning: Could not load .env file")
 	}
 
 	supabaseKey := os.Getenv("API_KEY")
 	supabaseURL := os.Getenv("API_URL")
-
-	fmt.Printf("API_URL: %s\n", supabaseURL)
-	fmt.Printf("API_KEY length: %d\n", len(supabaseKey))
 
 	if supabaseURL == "" {
 		return nil, fmt.Errorf("SUPABASE_URL is empty")
@@ -163,8 +203,6 @@ func insertAnime(animeItem Anime) (*Anime, error) {
 	}
 
 	url := fmt.Sprintf("%s/rest/v1/anime", supabaseURL)
-	fmt.Printf("Full URL: %s\n", url) // ← посмотрим полный URL
-
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("request creation error: %w", err)
@@ -175,114 +213,33 @@ func insertAnime(animeItem Anime) (*Anime, error) {
 	req.Header.Set("Authorization", "Bearer "+supabaseKey)
 	req.Header.Set("Prefer", "return=representation")
 
-	// Добавляем таймаут
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
-
-	fmt.Println("Sending request...")
+	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
-
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-	fmt.Printf("Response status: %d\n", resp.StatusCode)
-	fmt.Printf("Response body: %s\n", string(body))
-
 	if resp.StatusCode != 201 {
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
 	}
 
-	var result Anime
+	var result []Anime
 	err = json.Unmarshal(body, &result)
 	if err != nil {
 		return nil, fmt.Errorf("decode error: %w", err)
 	}
 
-	return &result, nil
+	if len(result) == 0 {
+		return nil, fmt.Errorf("no anime returned after insert")
+	}
+
+	return &result[0], nil
 }
 
-func insertGenre(genreItem Genre) (*Genre, error) {
-	err := godotenv.Load()
-	if err != nil {
-		fmt.Println("Warning: Could not load .env file")
-	}
-
-	exists, genreID, err := genreExists(genreItem.MalId)
-	if err != nil {
-		return nil, err
-	}
-
-	if exists {
-		// Если существует - возвращаем его
-		return &Genre{ID: genreID, MalId: genreItem.MalId, Name: genreItem.Name, Type: genreItem.Type, Url: genreItem.Url}, nil
-	}
-
-	supabaseKey := os.Getenv("API_KEY")
-	supabaseURL := os.Getenv("API_URL")
-
-	fmt.Printf("API_URL: %s\n", supabaseURL)
-	fmt.Printf("API_KEY length: %d\n", len(supabaseKey))
-
-	if supabaseURL == "" {
-		return nil, fmt.Errorf("SUPABASE_URL is empty")
-	}
-	if supabaseKey == "" {
-		return nil, fmt.Errorf("SUPABASE_KEY is empty")
-	}
-
-	jsonData, err := json.Marshal(genreItem)
-	if err != nil {
-		return nil, fmt.Errorf("marshal error: %w", err)
-	}
-
-	url := fmt.Sprintf("%s/rest/v1/genre", supabaseURL)
-	fmt.Printf("Full URL: %s\n", url) // ← посмотрим полный URL
-
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, fmt.Errorf("request creation error: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("apikey", supabaseKey)
-	req.Header.Set("Authorization", "Bearer "+supabaseKey)
-	req.Header.Set("Prefer", "return=representation")
-
-	// Добавляем таймаут
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
-
-	fmt.Println("Sending request...")
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %w", err)
-	}
-
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	fmt.Printf("Response status: %d\n", resp.StatusCode)
-	fmt.Printf("Response body: %s\n", string(body))
-
-	if resp.StatusCode != 201 {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
-	}
-
-	var result Genre
-	err = json.Unmarshal(body, &result)
-	if err != nil {
-		return nil, fmt.Errorf("decode error: %w", err)
-	}
-
-	return &result, nil
-}
-
-func genreExists(malId int) (bool, int64, error) {
+// animeExists - проверка существования аниме
+func animeExists(malId int) (bool, int64, error) {
 	supabaseKey := os.Getenv("API_KEY")
 	supabaseURL := os.Getenv("API_URL")
 
@@ -322,8 +279,116 @@ func genreExists(malId int) (bool, int64, error) {
 	return false, 0, nil
 }
 
-func insertAnimeGenre(animeID, genreID int64) error {
+// insertGenre - вставка жанра с проверкой существования
+func insertGenre(genreItem Genre) (*Genre, error) {
+	err := godotenv.Load()
+	if err != nil {
+		fmt.Println("Warning: Could not load .env file")
+	}
 
+	exists, genreID, err := genreExists(genreItem.MalId)
+	if err != nil {
+		return nil, err
+	}
+
+	if exists {
+		return &Genre{ID: genreID, MalId: genreItem.MalId, Name: genreItem.Name, Type: genreItem.Type, Url: genreItem.Url}, nil
+	}
+
+	supabaseKey := os.Getenv("API_KEY")
+	supabaseURL := os.Getenv("API_URL")
+
+	if supabaseURL == "" {
+		return nil, fmt.Errorf("SUPABASE_URL is empty")
+	}
+	if supabaseKey == "" {
+		return nil, fmt.Errorf("SUPABASE_KEY is empty")
+	}
+
+	jsonData, err := json.Marshal(genreItem)
+	if err != nil {
+		return nil, fmt.Errorf("marshal error: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/rest/v1/genres", supabaseURL)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("request creation error: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("apikey", supabaseKey)
+	req.Header.Set("Authorization", "Bearer "+supabaseKey)
+	req.Header.Set("Prefer", "return=representation")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 201 {
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
+	}
+
+	var result []Genre
+	err = json.Unmarshal(body, &result)
+	if err != nil {
+		return nil, fmt.Errorf("decode error: %w", err)
+	}
+
+	if len(result) == 0 {
+		return nil, fmt.Errorf("no genre returned after insert")
+	}
+
+	return &result[0], nil
+}
+
+// genreExists - проверка существования жанра
+func genreExists(malId int) (bool, int64, error) {
+	supabaseKey := os.Getenv("API_KEY")
+	supabaseURL := os.Getenv("API_URL")
+
+	url := fmt.Sprintf("%s/rest/v1/genres?mal_id=eq.%d&select=id", supabaseURL, malId)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return false, 0, err
+	}
+
+	req.Header.Set("apikey", supabaseKey)
+	req.Header.Set("Authorization", "Bearer "+supabaseKey)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return false, 0, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	var result []struct {
+		ID int64 `json:"id"`
+	}
+
+	err = json.NewDecoder(resp.Body).Decode(&result)
+	if err != nil {
+		return false, 0, err
+	}
+
+	if len(result) > 0 {
+		return true, result[0].ID, nil
+	}
+
+	return false, 0, nil
+}
+
+// insertAnimeGenre - создание связи аниме-жанр
+func insertAnimeGenre(animeID, genreID int64) error {
 	err := godotenv.Load()
 	if err != nil {
 		fmt.Println("Warning: Could not load .env file")
@@ -331,9 +396,6 @@ func insertAnimeGenre(animeID, genreID int64) error {
 
 	supabaseKey := os.Getenv("API_KEY")
 	supabaseURL := os.Getenv("API_URL")
-
-	fmt.Printf("API_URL: %s\n", supabaseURL)
-	fmt.Printf("API_KEY length: %d\n", len(supabaseKey))
 
 	if supabaseURL == "" {
 		return fmt.Errorf("SUPABASE_URL is empty")
@@ -352,9 +414,7 @@ func insertAnimeGenre(animeID, genreID int64) error {
 		return fmt.Errorf("marshal error: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/rest/v1/anime_genre", supabaseURL)
-	fmt.Printf("Full URL: %s\n", url) // ← посмотрим полный URL
-
+	url := fmt.Sprintf("%s/rest/v1/anime_genres", supabaseURL)
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return fmt.Errorf("request creation error: %w", err)
@@ -365,31 +425,22 @@ func insertAnimeGenre(animeID, genreID int64) error {
 	req.Header.Set("Authorization", "Bearer "+supabaseKey)
 	req.Header.Set("Prefer", "return=representation")
 
-	// Добавляем таймаут
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
-
-	fmt.Println("Sending request...")
+	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("HTTP request failed: %w", err)
 	}
-
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-	fmt.Printf("Response status: %d\n", resp.StatusCode)
-	fmt.Printf("Response body: %s\n", string(body))
-
 	if resp.StatusCode != 201 {
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
 	}
 
-	var result AnimeGenre
+	var result []AnimeGenre
 	err = json.Unmarshal(body, &result)
 	if err != nil {
-		return fmt.Errorf("decode error: %w", err)
+		fmt.Printf("Note: Could not decode response: %v\n", err)
 	}
 
 	return nil
