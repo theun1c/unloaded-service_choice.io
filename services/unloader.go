@@ -11,29 +11,25 @@ import (
 
 	"github.com/darenliang/jikan-go"
 	"github.com/joho/godotenv"
-	"github.com/k0kubun/pp"
 )
 
-// структура лоадера
 type Unloader struct {
 }
 
-// конструктор лоадера
 func NewUnloader() *Unloader {
 	return &Unloader{}
 }
 
-// создаем структуру жанров, при этом в структуре АНИМЕ будем использовать
-// jikan.MAlItem из за конвертации.
 type Genre struct {
+	ID    int64  `json:"id,omitempty"`
 	MalId int    `json:"mal_id"`
 	Type  string `json:"type"`
 	Name  string `json:"name"`
 	Url   string `json:"url"`
 }
 
-// Структура для необходимых данных
 type Anime struct {
+	ID           int64         `json:"id,omitempty"`
 	MalId        int           `json:"mal_id"`
 	Url          string        `json:"url"`
 	Images       jikan.Images3 `json:"images"`
@@ -46,39 +42,45 @@ type Anime struct {
 	Score        float64       `json:"score"`
 	Synopsis     string        `json:"synopsis"`
 	Year         int           `json:"year"`
-	Genres       []int         `json:"genres"`
 }
 
-// TODO: разбить объект Anime на несколько подъобъектов для удобной записи в супабейз
+type AnimeGenre struct {
+	AnimeID int64 `json:"anime_id"`
+	GenreID int64 `json:"genre_id"`
+}
 
-// получили поля Аниме. Получили поля жанров.
-// жанры будут записываться в БД и проверяться на новые поля.
-// аниме сущность будет хранить массив айдишников на жанры, что создает связь 1 ко мн
+// Start - выгрузка аниме по страницам
 func (u *Unloader) Start() {
-	// в этом месте получаем только 25 записей за 1 запрос.
-	// нужно будет увеличить таймаут и итерировать страницы
-	anime, err := jikan.GetTopAnime("tv", "bypopularity", 2)
+	err := godotenv.Load()
 	if err != nil {
-		fmt.Println("error: ", err)
+		fmt.Println("Warning: Could not load .env file")
+	}
+
+	var page int
+	fmt.Print("Введите номер страницы для выгрузки: ")
+	fmt.Scan(&page)
+
+	fmt.Printf("Загружаем страницу %d...\n", page)
+
+	anime, err := jikan.GetTopAnime("tv", "airing", page)
+	if err != nil {
+		fmt.Printf("Ошибка загрузки страницы %d: %v\n", page, err)
 		return
 	}
 
-	// объявляем слайс, в котором будут лежать объекты аниме с нуными полями
-	var animeList []Anime
+	if len(anime.Data) == 0 {
+		fmt.Println("Страница пустая")
+		return
+	}
 
-	// список и для жанров
-	var genreList []Genre
+	fmt.Printf("Получено %d аниме для обработки\n", len(anime.Data))
 
-	// запускаем все в цикле
+	totalAnime := 0
+	totalGenres := 0
+	totalRelations := 0
+
 	for i := 0; i < len(anime.Data); i++ {
-		// TODO: так может не делать общую структуру а разбить по мелким объектам сразу ?
-		// А нужно ли вообще разбивать все на разные таблицы ?
-
-		// пришел к выводу о том, что ТИПЫ аниме выделять в отдельную таблицу не стоит
-		// поскольку типы не нужны в аналитике и в данном проекте. они являются просто текстовым полем - не более
-		// и влияют только на описание, в то время как ЖАНРЫ, которые следует выделить в отдельную таблицу,
-		// помогут в реализации основной задумки проекта
-		anm := Anime{
+		animeItem := Anime{
 			MalId:        anime.Data[i].MalId,
 			Url:          anime.Data[i].Url,
 			Images:       anime.Data[i].Images,
@@ -93,59 +95,300 @@ func (u *Unloader) Start() {
 			Year:         anime.Data[i].Year,
 		}
 
+		fmt.Printf("[%d] %s\n", i+1, animeItem.Title)
+
+		insertedAnime, err := insertAnime(animeItem)
+		if err != nil {
+			fmt.Printf("Ошибка аниме: %v\n", err)
+			continue
+		}
+
+		if insertedAnime.ID == 0 {
+			fmt.Printf("Аниме уже существует\n")
+		} else {
+			totalAnime++
+			fmt.Printf("Аниме добавлено (ID: %d)\n", insertedAnime.ID)
+		}
+
+		fmt.Printf("Жанров: %d\n", len(anime.Data[i].Genres))
+		genreCount := 0
+
 		for j := 0; j < len(anime.Data[i].Genres); j++ {
-			gnr := Genre{
+			genreItem := Genre{
 				MalId: anime.Data[i].Genres[j].MalId,
 				Type:  anime.Data[i].Genres[j].Type,
 				Name:  anime.Data[i].Genres[j].Name,
 				Url:   anime.Data[i].Genres[j].Url,
 			}
 
-			anm.Genres = append(anm.Genres, gnr.MalId)
+			insertedGenre, err := insertGenre(genreItem)
+			if err != nil {
+				fmt.Printf("Ошибка жанра %s: %v\n", genreItem.Name, err)
+				continue
+			}
 
-			genreList = append(genreList, gnr)
+			if insertedGenre.ID == 0 {
+				fmt.Printf("Жанр уже существует: %s\n", insertedGenre.Name)
+			} else {
+				totalGenres++
+				fmt.Printf("Жанр добавлен: %s (ID: %d)\n", insertedGenre.Name, insertedGenre.ID)
+			}
+
+			err = insertAnimeGenre(insertedAnime.ID, insertedGenre.ID)
+			if err != nil {
+				fmt.Printf("Ошибка связи: %v\n", err)
+				continue
+			}
+
+			totalRelations++
+			genreCount++
+			fmt.Printf("Связь создана\n")
 		}
 
-		animeList = append(animeList, anm)
+		fmt.Printf("Создано связей: %d/%d\n", genreCount, len(anime.Data[i].Genres))
+		time.Sleep(100 * time.Millisecond)
 	}
 
-	// выводим полученные объекты
-	for i := 0; i < len(animeList); i++ {
-		pp.Println(animeList[i])
-	}
+	fmt.Printf("Страница %d завершена\n", page)
+	fmt.Printf("Итого за страницу:\n")
+	fmt.Printf("Новых аниме: %d\n", totalAnime)
+	fmt.Printf("Новых жанров: %d\n", totalGenres)
+	fmt.Printf("Создано связей: %d\n", totalRelations)
+}
 
-	uniqueGenres := removeDup(genreList)
-	count1 := 0
-	for i := 0; i < len(uniqueGenres); i++ {
-		pp.Println(uniqueGenres[i])
-		count1++
-	}
-
-	err = insertAnime(animeList)
+// insertAnime - вставка аниме с проверкой существования
+func insertAnime(animeItem Anime) (*Anime, error) {
+	exists, animeID, err := animeExists(animeItem.MalId)
 	if err != nil {
-		fmt.Println(err)
+		return nil, fmt.Errorf("failed to check anime existence: %w", err)
 	}
 
-}
-
-// для удаления повторяющихся жанров
-func removeDup(inputSlice []Genre) []Genre {
-	isUnique := map[Genre]bool{}
-
-	resultSlice := []Genre{}
-
-	for _, item := range inputSlice {
-		if !isUnique[item] {
-			isUnique[item] = true
-			resultSlice = append(resultSlice, item)
-		}
+	if exists {
+		fmt.Printf("Аниме уже существует: %s (ID: %d)\n", animeItem.Title, animeID)
+		return &Anime{
+			ID:           animeID,
+			MalId:        animeItem.MalId,
+			Url:          animeItem.Url,
+			Images:       animeItem.Images,
+			Title:        animeItem.Title,
+			TitleEnglish: animeItem.TitleEnglish,
+			Type:         animeItem.Type,
+			Episodes:     animeItem.Episodes,
+			Status:       animeItem.Status,
+			Rating:       animeItem.Rating,
+			Score:        animeItem.Score,
+			Synopsis:     animeItem.Synopsis,
+			Year:         animeItem.Year,
+		}, nil
 	}
 
-	return resultSlice
+	err = godotenv.Load()
+	if err != nil {
+		fmt.Println("Warning: Could not load .env file")
+	}
+
+	supabaseKey := os.Getenv("API_KEY")
+	supabaseURL := os.Getenv("API_URL")
+
+	if supabaseURL == "" {
+		return nil, fmt.Errorf("SUPABASE_URL is empty")
+	}
+	if supabaseKey == "" {
+		return nil, fmt.Errorf("SUPABASE_KEY is empty")
+	}
+
+	jsonData, err := json.Marshal(animeItem)
+	if err != nil {
+		return nil, fmt.Errorf("marshal error: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/rest/v1/anime", supabaseURL)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("request creation error: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("apikey", supabaseKey)
+	req.Header.Set("Authorization", "Bearer "+supabaseKey)
+	req.Header.Set("Prefer", "return=representation")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 201 {
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
+	}
+
+	var result []Anime
+	err = json.Unmarshal(body, &result)
+	if err != nil {
+		return nil, fmt.Errorf("decode error: %w", err)
+	}
+
+	if len(result) == 0 {
+		return nil, fmt.Errorf("no anime returned after insert")
+	}
+
+	return &result[0], nil
 }
 
-func insertAnime(animeList []Anime) error {
+// animeExists - проверка существования аниме
+func animeExists(malId int) (bool, int64, error) {
+	supabaseKey := os.Getenv("API_KEY")
+	supabaseURL := os.Getenv("API_URL")
 
+	url := fmt.Sprintf("%s/rest/v1/anime?mal_id=eq.%d&select=id", supabaseURL, malId)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return false, 0, err
+	}
+
+	req.Header.Set("apikey", supabaseKey)
+	req.Header.Set("Authorization", "Bearer "+supabaseKey)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return false, 0, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	var result []struct {
+		ID int64 `json:"id"`
+	}
+
+	err = json.NewDecoder(resp.Body).Decode(&result)
+	if err != nil {
+		return false, 0, err
+	}
+
+	if len(result) > 0 {
+		return true, result[0].ID, nil
+	}
+
+	return false, 0, nil
+}
+
+// insertGenre - вставка жанра с проверкой существования
+func insertGenre(genreItem Genre) (*Genre, error) {
+	err := godotenv.Load()
+	if err != nil {
+		fmt.Println("Warning: Could not load .env file")
+	}
+
+	exists, genreID, err := genreExists(genreItem.MalId)
+	if err != nil {
+		return nil, err
+	}
+
+	if exists {
+		return &Genre{ID: genreID, MalId: genreItem.MalId, Name: genreItem.Name, Type: genreItem.Type, Url: genreItem.Url}, nil
+	}
+
+	supabaseKey := os.Getenv("API_KEY")
+	supabaseURL := os.Getenv("API_URL")
+
+	if supabaseURL == "" {
+		return nil, fmt.Errorf("SUPABASE_URL is empty")
+	}
+	if supabaseKey == "" {
+		return nil, fmt.Errorf("SUPABASE_KEY is empty")
+	}
+
+	jsonData, err := json.Marshal(genreItem)
+	if err != nil {
+		return nil, fmt.Errorf("marshal error: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/rest/v1/genres", supabaseURL)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("request creation error: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("apikey", supabaseKey)
+	req.Header.Set("Authorization", "Bearer "+supabaseKey)
+	req.Header.Set("Prefer", "return=representation")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 201 {
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
+	}
+
+	var result []Genre
+	err = json.Unmarshal(body, &result)
+	if err != nil {
+		return nil, fmt.Errorf("decode error: %w", err)
+	}
+
+	if len(result) == 0 {
+		return nil, fmt.Errorf("no genre returned after insert")
+	}
+
+	return &result[0], nil
+}
+
+// genreExists - проверка существования жанра
+func genreExists(malId int) (bool, int64, error) {
+	supabaseKey := os.Getenv("API_KEY")
+	supabaseURL := os.Getenv("API_URL")
+
+	url := fmt.Sprintf("%s/rest/v1/genres?mal_id=eq.%d&select=id", supabaseURL, malId)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return false, 0, err
+	}
+
+	req.Header.Set("apikey", supabaseKey)
+	req.Header.Set("Authorization", "Bearer "+supabaseKey)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return false, 0, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	var result []struct {
+		ID int64 `json:"id"`
+	}
+
+	err = json.NewDecoder(resp.Body).Decode(&result)
+	if err != nil {
+		return false, 0, err
+	}
+
+	if len(result) > 0 {
+		return true, result[0].ID, nil
+	}
+
+	return false, 0, nil
+}
+
+// insertAnimeGenre - создание связи аниме-жанр
+func insertAnimeGenre(animeID, genreID int64) error {
 	err := godotenv.Load()
 	if err != nil {
 		fmt.Println("Warning: Could not load .env file")
@@ -154,10 +397,6 @@ func insertAnime(animeList []Anime) error {
 	supabaseKey := os.Getenv("API_KEY")
 	supabaseURL := os.Getenv("API_URL")
 
-	// Добавь проверку и вывод значений
-	fmt.Printf("API_URL: %s\n", supabaseURL)
-	fmt.Printf("API_KEY length: %d\n", len(supabaseKey))
-
 	if supabaseURL == "" {
 		return fmt.Errorf("SUPABASE_URL is empty")
 	}
@@ -165,14 +404,17 @@ func insertAnime(animeList []Anime) error {
 		return fmt.Errorf("SUPABASE_KEY is empty")
 	}
 
-	jsonData, err := json.Marshal(animeList)
+	animeGenreItem := AnimeGenre{
+		AnimeID: animeID,
+		GenreID: genreID,
+	}
+
+	jsonData, err := json.Marshal(animeGenreItem)
 	if err != nil {
 		return fmt.Errorf("marshal error: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/rest/v1/anime", supabaseURL)
-	fmt.Printf("Full URL: %s\n", url) // ← посмотрим полный URL
-
+	url := fmt.Sprintf("%s/rest/v1/anime_genres", supabaseURL)
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return fmt.Errorf("request creation error: %w", err)
@@ -183,33 +425,23 @@ func insertAnime(animeList []Anime) error {
 	req.Header.Set("Authorization", "Bearer "+supabaseKey)
 	req.Header.Set("Prefer", "return=representation")
 
-	// Добавляем таймаут
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
-
-	fmt.Println("Sending request...")
+	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("HTTP request failed: %w", err)
 	}
-
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-	fmt.Printf("Response status: %d\n", resp.StatusCode)
-	fmt.Printf("Response body: %s\n", string(body))
-
 	if resp.StatusCode != 201 {
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
 	}
 
-	var result []Anime
+	var result []AnimeGenre
 	err = json.Unmarshal(body, &result)
 	if err != nil {
-		return fmt.Errorf("decode error: %w", err)
+		fmt.Printf("Note: Could not decode response: %v\n", err)
 	}
 
-	fmt.Printf("Inserted %d records\n", len(result))
 	return nil
 }
